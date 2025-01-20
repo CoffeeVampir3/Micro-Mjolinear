@@ -35,6 +35,15 @@ class RMSNorm(nn.Module):
         if self.weight is not None:
             output = output * self.weight
         return output
+    
+class SimpleRMSNorm(nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.scale = dim ** 0.5
+        self.eps = eps
+        
+    def forward(self, x):
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
 class Rotary(torch.nn.Module):
     def __init__(self, dim, base=10000):
@@ -127,22 +136,24 @@ class CausalSelfAttention(nn.Module):
         self.n_embd = n_embd
         
         self.c_qkv = CPLinear(n_embd, n_head, head_dim, rank, q_rank)
-        self.c_proj = nn.Linear(n_head * head_dim, n_embd, bias=False)
-        self.c_proj.weight.data.zero_()
+        self.c_proj = xATGLU(n_head * head_dim, n_embd, bias=False)
+        #self.c_proj.weight.data.zero_()
         self.rotary = Rotary(head_dim)
         
         self.using_groupnorm = using_groupnorm
-        if self.using_groupnorm:
-            self.subln = RMSNorm(head_dim, eps=1e-5, elementwise_affine=True)
         
         # From what I understand, the slope tensor is effectively mimicking a causal mask for lightning attn.
         self.use_lightning = use_lightning
         if use_lightning:
             self.slopes = _build_slope_tensor(n_head)
             
+            self.srmsnorm = SimpleRMSNorm(head_dim)
+            
             # Seems to be a reasonable initialization.
-            initial_scaling = 1 / math.sqrt(self.head_dim)
-            self.lightning_attn_scale = nn.Parameter(torch.ones(1) * initial_scaling)
+            # self.lightning_attn_scale = nn.Parameter(torch.ones(1))
+            
+        elif self.using_groupnorm:
+            self.subln = RMSNorm(head_dim, eps=1e-5, elementwise_affine=True)
 
     def forward(self, x):
         B, T, C = x.size()
@@ -151,33 +162,35 @@ class CausalSelfAttention(nn.Module):
         
         if self.use_lightning:
             
+            q = q * torch.sigmoid(q)
+            k = k * torch.sigmoid(k)
+            
             # Regular rope
             cos, sin = self.rotary(q)
             q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
-            
-            # Stabilize query matrix before doing attn, without this flash attn seems to go to inf/nan sometimes.
-            q = q * self.lightning_attn_scale
             
             # Lightning Attention
+            q = q + 1e-6
+            k = k + 1e-6
             slopes = self.slopes.to(q.device)
             attn_out = lightning_attn_func(q, k, v, slopes)
+            attn_out = self.srmsnorm(attn_out)
             
-            attn_out = attn_out.transpose(1, 2)
+            attn_out = attn_out.contiguous().view(B, T, self.n_head * self.head_dim)
+            y = self.c_proj(attn_out)
+            return y
             
-        else:
-            
-            # Regular rope
-            cos, sin = self.rotary(q)
-            q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
-            
-            # Regular scaled dot product attention
-            attn_out = F.scaled_dot_product_attention(
-                q.transpose(1, 2),
-                k.transpose(1, 2),
-                v.transpose(1, 2),
-                is_causal=True)
+        # Regular rope
+        cos, sin = self.rotary(q)
+        q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
         
-        
+        # Regular scaled dot product attention
+        attn_out = F.scaled_dot_product_attention(
+            q.transpose(1, 2),
+            k.transpose(1, 2),
+            v.transpose(1, 2),
+            is_causal=True)
+    
         if self.using_groupnorm:
             attn_out = self.subln(attn_out)
         
@@ -190,15 +203,12 @@ class MLP(nn.Module):
         super().__init__()
         hidden_dim = math.floor(8 / 3 * n_embd)
         
-        self.c_fc1 = nn.Linear(n_embd, hidden_dim, bias=False)
-        self.c_fc2 = nn.Linear(n_embd, hidden_dim, bias=False)
+        self.fc = xATGLU(n_embd, hidden_dim, bias=False)
         self.c_proj = nn.Linear(hidden_dim, n_embd, bias=False)
         self.c_proj.weight.data.zero_()
 
     def forward(self, x):
-        x1 = self.c_fc1(x)
-        x2 = self.c_fc2(x)
-        x = F.silu(x1) * x2
+        x = self.fc(x)
         x = self.c_proj(x)
         return x
 
@@ -207,8 +217,10 @@ class TensorProductTransformerBlock(nn.Module):
         super().__init__()
         self.attn = CausalSelfAttention(n_embd, n_head, head_dim, rank, q_rank, using_groupnorm, use_lightning)
         self.mlp = MLP(n_embd)
+        self.learned_residual_scale_attn = nn.Parameter(torch.ones(1))
+        self.learned_residual_scale_mlp = nn.Parameter(torch.ones(1))
 
     def forward(self, x):
-        x = x + self.attn(F.rms_norm(x, (x.size(-1),)))
-        x = x + self.mlp(F.rms_norm(x, (x.size(-1),)))
+        x = self.learned_residual_scale_attn * x + self.attn(F.rms_norm(x, (x.size(-1),)))
+        x = self.learned_residual_scale_mlp * x + self.mlp(F.rms_norm(x, (x.size(-1),)))
         return x
