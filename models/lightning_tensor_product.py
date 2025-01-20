@@ -139,6 +139,10 @@ class CausalSelfAttention(nn.Module):
         self.use_lightning = use_lightning
         if use_lightning:
             self.slopes = _build_slope_tensor(n_head)
+            
+            # Seems to be a reasonable initialization.
+            initial_scaling = 1 / math.sqrt(self.head_dim)
+            self.lightning_attn_scale = nn.Parameter(torch.ones(1) * initial_scaling)
 
     def forward(self, x):
         B, T, C = x.size()
@@ -152,12 +156,13 @@ class CausalSelfAttention(nn.Module):
             q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
             
             # Scale query or key matrix before doing rope
-            scaling = 1 / math.sqrt(self.head_dim)
-            q *= scaling
+            q = q * self.lightning_attn_scale
             
             # Lightning Attention
             slopes = self.slopes.to(q.device)
             attn_out = lightning_attn_func(q, k, v, slopes)
+            
+            attn_out = attn_out.transpose(1, 2)
             
         else:
             
