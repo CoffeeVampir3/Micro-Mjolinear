@@ -152,7 +152,7 @@ class CausalSelfAttention(nn.Module):
             q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
             
             # Scale query or key matrix before doing rope
-            scaling = math.sqrt(1 / math.sqrt(self.head_dim))
+            scaling = 1 / math.sqrt(self.head_dim)
             q *= scaling
             
             # Lightning Attention
