@@ -155,7 +155,7 @@ class CausalSelfAttention(nn.Module):
             cos, sin = self.rotary(q)
             q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
             
-            # Scale query or key matrix before doing rope
+            # Stabilize query matrix before doing attn, without this flash attn seems to go to inf/nan sometimes.
             q = q * self.lightning_attn_scale
             
             # Lightning Attention
