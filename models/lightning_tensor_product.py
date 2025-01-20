@@ -6,6 +6,14 @@ from lightning_attn.utils import _build_slope_tensor
 import math
 from .extact import xATGLU
 
+# Lightning attention 1 and 2
+# https://arxiv.org/abs/2405.17381
+# https://arxiv.org/abs/2401.04658
+
+# Tensor Product Attention
+# https://arxiv.org/abs/2501.06425
+
+# The starting point for this code is from the Tensor Product Attention github repo:
 # Modified, original from https://github.com/tensorgi/T6/blob/main/model/T6_ropek.py
 
 class RMSNorm(nn.Module):
