@@ -150,7 +150,7 @@ class CausalSelfAttention(nn.Module):
             self.slopes = _build_slope_tensor(n_head)
             self.srmsnorm = RMSNorm(head_dim, eps=1e-5, elementwise_affine=True)
             
-        elif self.using_groupnorm:
+        if self.using_groupnorm:
             self.subln = RMSNorm(head_dim, eps=1e-5, elementwise_affine=True)
 
     def forward(self, x):
@@ -174,30 +174,32 @@ class CausalSelfAttention(nn.Module):
                 q.transpose(1, 2), 
                 k.transpose(1, 2), 
                 v.transpose(1, 2), slopes)
-            attn_out = self.srmsnorm(attn_out)
+            
+            if self.using_groupnorm:
+                attn_out = self.srmsnorm(attn_out)
             
             # B H T D -> B T (H*D)
             attn_out = attn_out.transpose(1, 2).contiguous().view(B, T, self.n_head * self.head_dim)
             y = self.c_proj(attn_out)
             return y
+        else:
+            # Regular rope
+            cos, sin = self.rotary(q)
+            q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
             
-        # Regular rope
-        cos, sin = self.rotary(q)
-        q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
+            # Called with B H T D 
+            attn_out = F.scaled_dot_product_attention(
+                q.transpose(1, 2),
+                k.transpose(1, 2),
+                v.transpose(1, 2),
+                is_causal=True)
         
-        # Regular scaled dot product attention
-        attn_out = F.scaled_dot_product_attention(
-            q.transpose(1, 2),
-            k.transpose(1, 2),
-            v.transpose(1, 2),
-            is_causal=True)
-    
-        if self.using_groupnorm:
-            attn_out = self.subln(attn_out)
-        
-        attn_out = attn_out.transpose(1, 2).contiguous().view(B, T, self.n_head * self.head_dim)
-        y = self.c_proj(attn_out)
-        return y
+            if self.using_groupnorm:
+                attn_out = self.subln(attn_out)
+            
+            attn_out = attn_out.transpose(1, 2).contiguous().view(B, T, self.n_head * self.head_dim)
+            y = self.c_proj(attn_out)
+            return y
 
 class MLP(nn.Module):
     def __init__(self, n_embd):
@@ -222,6 +224,6 @@ class TensorProductTransformerBlock(nn.Module):
         self.learned_residual_scale_mlp = nn.Parameter(torch.ones(1))
 
     def forward(self, x):
-        x = self.learned_residual_scale_attn * x + self.attn(F.rms_norm(x, (x.size(-1),)))
-        x = self.learned_residual_scale_mlp * x + self.mlp(F.rms_norm(x, (x.size(-1),)))
+        x = self.learned_residual_scale_attn * x + self.attn(x)
+        x = self.learned_residual_scale_mlp * x + self.mlp(x)
         return x

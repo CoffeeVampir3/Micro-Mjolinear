@@ -18,8 +18,8 @@ class WaifuLMUwU(nn.Module):
                 rank=2,
                 q_rank=6,
                 using_groupnorm=True,
-                use_lightning=True
-            ) for _ in range(n_layer)
+                use_lightning=i % 3 == 0
+            ) for i in range(n_layer)
         ])
         
         self.ln_f = nn.LayerNorm(n_embd)

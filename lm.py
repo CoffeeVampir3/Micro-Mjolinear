@@ -42,7 +42,7 @@ class JSONLDataset(Dataset):
     def __getitem__(self, idx):
         return self.sequences[idx]
 
-def train_model(model, train_loader, optimizer, device, epochs=5):
+def train_model(model, train_loader, optimizer, device, epochs=5, fwd_precision=torch.float32):
     model.train()
     criterion = nn.CrossEntropyLoss()
     scaler = torch.amp.GradScaler("cuda")
@@ -73,7 +73,7 @@ def train_model(model, train_loader, optimizer, device, epochs=5):
             data = data.to(device)
             optimizer.zero_grad(set_to_none=True)
             
-            with torch.autocast(device_type='cuda', dtype=torch.float32):
+            with torch.autocast(device_type='cuda', dtype=fwd_precision):
                 hidden_states, classifier_weights = model(data)
                 
                 loss = linear_cross_entropy(
@@ -130,7 +130,7 @@ def main():
         tokenizer=tokenizer,
         seq_length=SEQ_LENGTH,
         text_key="text",
-        max_files=None
+        max_files=5
     )
     train_loader = DataLoader(
         dataset,
@@ -161,7 +161,7 @@ def main():
     
     count_parameters_layerwise(model)
 
-    train_model(model, train_loader, optimizer, DEVICE, EPOCHS)
+    train_model(model, train_loader, optimizer, DEVICE, EPOCHS, fwd_precision=torch.float32)
 
     torch.save(model.state_dict(), 'trained_model.pth')
 
