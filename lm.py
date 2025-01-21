@@ -126,7 +126,7 @@ def main():
     ).to(DEVICE)
 
     dataset = JSONLDataset(
-        directory_path="/home/blackroot/Desktop/lm/Data_big",
+        directory_path="./Data_big",
         tokenizer=tokenizer,
         seq_length=SEQ_LENGTH,
         text_key="text",
@@ -142,7 +142,7 @@ def main():
 
     optimizer = DistributedShampoo(
         model.parameters(),
-        lr=0.001,
+        lr=0.0001,
         betas=(0.9, 0.999),
         epsilon=1e-12,
         weight_decay=1e-05,

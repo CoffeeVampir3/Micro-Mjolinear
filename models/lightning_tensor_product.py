@@ -43,7 +43,9 @@ class SimpleRMSNorm(nn.Module):
         self.eps = eps
         
     def forward(self, x):
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        # Combining the scale factor into the rsqrt computation
+        # Instead of x/(norm/scale), we do x * (scale/norm) = x * scale * (1/norm)
+        return x * (self.scale * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps))
 
 class Rotary(torch.nn.Module):
     def __init__(self, dim, base=10000):
@@ -146,11 +148,7 @@ class CausalSelfAttention(nn.Module):
         self.use_lightning = use_lightning
         if use_lightning:
             self.slopes = _build_slope_tensor(n_head)
-            
-            self.srmsnorm = SimpleRMSNorm(head_dim)
-            
-            # Seems to be a reasonable initialization.
-            # self.lightning_attn_scale = nn.Parameter(torch.ones(1))
+            self.srmsnorm = RMSNorm(head_dim, eps=1e-5, elementwise_affine=True)
             
         elif self.using_groupnorm:
             self.subln = RMSNorm(head_dim, eps=1e-5, elementwise_affine=True)
@@ -158,25 +156,28 @@ class CausalSelfAttention(nn.Module):
     def forward(self, x):
         B, T, C = x.size()
 
+        # B T C -> B T H D
         q, k, v = self.c_qkv(x)
         
         if self.use_lightning:
-            
             q = q * torch.sigmoid(q)
             k = k * torch.sigmoid(k)
-            
             # Regular rope
             cos, sin = self.rotary(q)
             q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
             
             # Lightning Attention
-            q = q + 1e-6
-            k = k + 1e-6
             slopes = self.slopes.to(q.device)
-            attn_out = lightning_attn_func(q, k, v, slopes)
+            
+            # Called with B H T D 
+            attn_out = lightning_attn_func(
+                q.transpose(1, 2), 
+                k.transpose(1, 2), 
+                v.transpose(1, 2), slopes)
             attn_out = self.srmsnorm(attn_out)
             
-            attn_out = attn_out.contiguous().view(B, T, self.n_head * self.head_dim)
+            # B H T D -> B T (H*D)
+            attn_out = attn_out.transpose(1, 2).contiguous().view(B, T, self.n_head * self.head_dim)
             y = self.c_proj(attn_out)
             return y
             
